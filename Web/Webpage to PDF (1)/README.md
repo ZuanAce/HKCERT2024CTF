@@ -70,8 +70,7 @@ The flag file is stored in `/flag.txt`. Since `wkhtmltopdf` processes local file
 
 ---
 
-### Flag  
-By combining LFI with command-line injection, the flag is retrieved:  
+## Flag  
 ```
 hkcert24{h0w-t0-use-AI-wisely-and-s4fe1y?}
 ```  
